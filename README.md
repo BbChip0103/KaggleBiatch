@@ -20,7 +20,7 @@ I cut all the noise files by sliding window of length = 1 sec by constant step f
 I just used 5 kfolds by person ids for all classes, except silence. 6 silence files were also divided into 5 folds (in one fold there were both type of noise - pink and other.)
 
 # Solution overview
-I trained L1 models on 31 class on spectrograms. I didn't do any preprocessing.
+I trained L1 models on 31 class on spectrograms. I didn't do any preprocessing. For augmentations I used: random volume, random noise - normalized by power energy, random shift and random speed.
 
 I didn't play much with L2 models. I tried xgboost stacking and neural net stacking. After teaming up I didn't spend a lof of time with that - my teammates were doing that better :) 
 
