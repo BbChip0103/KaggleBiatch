@@ -24,7 +24,7 @@ I trained L1 models on 31 class on spectrograms with TTA. I didn't do any prepro
 
 I didn't play much with L2 models. I tried xgboost stacking and neural net stacking. After teaming up I didn't spend a lof of time with that - my teammates were doing that better :) 
 
-I also trained separate model for unknown unknowns.
+I also trained separate model for unknown unknowns:
 
 # Unknown unknowns 
 
@@ -38,7 +38,7 @@ Here we have words "stop" and "dog" - and generating the word "stog". (In "resou
 
 After that I trained 2 networks (Densenet201 and VGGbn19) on 32 classes (31 original class and 1 class for double words) - Model A. After that I took ~3100 most confident test predictions and added them to train. Trained 3 networks (Densenet201, VGGbn19 and InceptionResnetV2) on the new dataset - 31 original class + pseudo "unknown unknowns" - Model B.
 
-Because I finished doing that 2 days before the end of competition there were no time to retrained all other model of ensemble - so we just replaced all predictions from our ensemble by "unknown" where the Model B was giving label for "unknown unknown".
+Because I finished doing that 2 days before the end of competition there were no time to retrained all other model of ensemble - so we just replaced all predictions from our ensemble by "unknown" where the Model B was giving label for "unknown unknown". I found for sure at least 5 unknown unknowns: ["follow", "learn", "backward", "forward", "visual"]. There were also some strange words, like "warehouse". So the Model B found 14808 unknown unknowns in the test.
 
 If replaced by Model A - the private LB goes up by 0.01. If replaced by Model B - the increase is 0.24 on private LB.
 
