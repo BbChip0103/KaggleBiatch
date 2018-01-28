@@ -1,4 +1,4 @@
-This is part of 4th place solution of our team for TensorFlow Speech Recognition Challenge - https://www.kaggle.com/c/tensorflow-speech-recognition-challenge/.
+This is part of 4th place solution of our team for Kaggle TensorFlow Speech Recognition Challenge - https://www.kaggle.com/c/tensorflow-speech-recognition-challenge/.
 
 # Prerequirements
 * python 2.7
