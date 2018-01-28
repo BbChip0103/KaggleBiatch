@@ -5,6 +5,8 @@ This is part of 4th place solution of our team for Kaggle TensorFlow Speech Reco
 * pytorch
 
 # Stucture
+notebooks : jupyter notebooks 
+src:
 - dataset - dataloaders
 - utils - blending utils; pseudo, submission and double words generation
 - nets - folder with networks
