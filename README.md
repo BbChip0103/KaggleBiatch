@@ -5,15 +5,15 @@ This is part of 4th place solution of our team for Kaggle TensorFlow Speech Reco
 * pytorch
 
 # Stucture
-notebooks : jupyter notebooks 
-src:
-- dataset - dataloaders
-- utils - blending utils; pseudo, submission and double words generation
-- nets - folder with networks
-- img - augmentations
-- stacker.py - xgboost L2 model 
-- neural_stacker.py - neural net L2 model
-- main - training and predicting with TTA
+* notebooks : jupyter notebooks 
+* src:
+  - dataset - dataloaders
+  - utils - blending utils; pseudo, submission and double words generation
+  - nets - folder with networks
+  - img - augmentations
+  - stacker.py - xgboost L2 model 
+  - neural_stacker.py - neural net L2 model
+  - main - training and predicting with TTA
 
 # Silence preparation
 I cut all the noise files by sliding window of length = 1 sec by constant step for all files. The step size was that the number of 1sec silence clips were around 2300 - to make dataset balanced.
