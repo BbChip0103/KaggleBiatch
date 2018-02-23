@@ -23,7 +23,6 @@ import config
 import nn.losses as losses_utils
 import nn.tools as tools
 from skimage.io import imsave
-import fegolib as fgl
 import warnings
 import zipfile
 from sklearn.metrics import roc_auc_score, accuracy_score
@@ -168,7 +167,7 @@ class Classifier:
         """
         """
         self.weights_folder = self.output_folder + 'fold_w_%d/'%self.fold_num
-        self.weights_folder = fgl.utils.path_that_not_exist(self.weights_folder, create = True)
+        self.weights_folder = utils.path_that_not_exist(self.weights_folder, create = True)
 
         if self.use_cuda:
             self.net.cuda()
@@ -218,7 +217,7 @@ class Classifier:
             
             #save weights on each epoch    
             weights_final_name = self.weights_folder + 'w_' + str(epoch_id) + '.dat'
-            weights_final_name = fgl.utils.path_that_not_exist(weights_final_name)
+            weights_final_name = utils.path_that_not_exist(weights_final_name)
             torch.save(self.net.state_dict(), weights_final_name)
 
             #saving to pandas df
