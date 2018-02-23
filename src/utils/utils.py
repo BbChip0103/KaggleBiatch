@@ -45,29 +45,6 @@ def create_unique_path(path, create = False):
 
     return new_path
 
-
-def zip_src_folder(save_path, exclude_folders = [], goal_dir = '.', name = 'src'):
-    r"""Zips whole src folder and saves it to save_path.
-    -------
-    Args:
-    - save_path = where to save .zip file
-    - exclude_folders = list of folders to be excluded
-    - goal_dir = if zip all files in current folder = ".", if in parent folder = "../"
-            so if you use this function in main, then goal_dir = "."
-    - name = name of .zip file
-    Note: by default put this function in file that is in src/ folder (i.e put it in main.py).
-    """
-    zf = zipfile.ZipFile(save_path + name + "_zipped.zip", "w")
-    for dirname, subdirs, files in os.walk(goal_dir):
-        for ef in exclude_folders:
-            if (ef in subdirs):
-                subdirs.remove(ef)
-        zf.write(dirname)
-        for filename in files:
-            zf.write(os.path.join(dirname, filename))
-    zf.close()
-
-
 def save_src_to_zip(save_path, exclude_folders = [], name = 'src'):
     goal_dir = "../"
     zf = zipfile.ZipFile(save_path + name + "_zipped.zip", "w")
