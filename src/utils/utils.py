@@ -4,7 +4,7 @@ import numpy as np
 from scipy.io import wavfile
 import zipfile
 
-def create_unique_path(path, create = False):
+def path_that_not_exist(path, create = False):
     r"""Checks if existing path doesn't exist - and if exist 
     add new path (so old path isn't rewritten). It works for folders and files
     -------
