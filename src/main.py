@@ -13,7 +13,6 @@ import pandas as pd
 import time
 import random
 
-import fegolib as fgl
 import img.augmentation as aug
 import nn.classifier
 import torch
@@ -149,7 +148,7 @@ class Main(object):
 
         #folders
         self.folder_name = config.OUTPUT_FOLDER + name
-        self.folder_name = fgl.utils.path_that_not_exist(self.folder_name, create = True)
+        self.folder_name = utils.path_that_not_exist(self.folder_name, create = True)
         utils.save_src_to_zip(self.folder_name, ['data'])
         
         if (self.folder_for_model_weights is not None) & (self.predict_custom_flag):
