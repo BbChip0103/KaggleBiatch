@@ -1,0 +1,16 @@
+{
+  "mode_stack": {
+    "N_threads": 46,
+    "RS": 666,
+    "clf_name": "lgb",
+    "early_stopping_rounds": 100,
+    "folders": [
+      "nn/70",
+      "nn/94"
+    ],
+    "lr": 0.01,
+    "n_folds": 5,
+    "num_rounds": 3000,
+    "use_folds": "all"
+  }
+}

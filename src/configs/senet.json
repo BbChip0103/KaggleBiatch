@@ -1,0 +1,25 @@
+{
+  "batch_size": 28,
+  "dataset": {
+    "resize": [
+      512,
+      512
+    ],
+    "sampler": null
+  },
+  "mode_train": {
+    "loss": {},
+    "lowest_lr": 1e-8,
+    "lr_scheduler": "plateau",
+    "optim": "adam",
+    "start_lr": 0.0001,
+    "unfreeze": 2
+  },
+  "n_epochs": 100,
+  "net_class": "senet.SENet",
+  "pretrained_weights": "7/weights/0_13.pth",
+  "pseudo_file": null,
+  "use_folds": [
+    0
+  ]
+}

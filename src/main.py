@@ -1,417 +1,149 @@
-import matplotlib
-matplotlib.use('Agg')
-
-import config
-import gc
-import glob
 import os
-import uuid
-import matplotlib.pyplot as plt
-
-import numpy as np
-import pandas as pd
-import time
-import random
-
-import img.augmentation as aug
-import nn.classifier
-import torch
-from utils import utils as utils
-import shutil
-
-from dataset.loader import Dataset, ImageDataset, CustomPredictionDataset
-from dataset.samplers import SilenceBinaryRandomSampler, UnknownsRandomSampler
-
-# 31 class nets
-from nets.test_net import TestNet
-from nets.incep_res_v2 import IncepResV2
-from nets.fb_resnet import FBResnet152
-from nets.dense_net import DenseNet, DenseNet_121
-from nets.dpn import DPN92
-from nets.resnext import Resnext101
-from nets.vgg import VGG19bn
-from nets.resnets import resnet18, resnet34, resnet50
-from nets.squeezenet import SqueezeNet
-from nets.drn import DRN107
-
-# aux
-from nets.vgg_aux import VGG19bn_aux
-
-# binary nets
-from nets_binary.vgg import binary_VGG19bn
-
-# 1 d net
-from nets_1d.testnet import TestNet_one_d
-
-from torch.utils.data import DataLoader
-from torch.utils.data.sampler import RandomSampler, SequentialSampler
-import torch
+import argparse
 import json
-import time
+import logging
+import subprocess as sp
+from shutil import copyfile
+from pathlib import Path
+import logging
+from multiprocessing import cpu_count
 
-batch_size = 64
-epochs = 100
+import torch
+import torch.multiprocessing
 
-mode = '31class' # '31class' 'binary'
-include_double_words = True
-#--------------------------------
-pseudo_file = None # 'nn_8/pseudo_nn_8_percent_20.csv' # None
-RS_list = [
-            15 * 1, 
-            # 15 * 2,
-            # 15 * 10,
-            # 15 * 20,
-            ]
-#-------------------------------
+from utils import utils
+from nn.pipe import Pipe
+from debugging.debug import Debugger
+from stacking.stacker import Stacker
 
-# time.sleep(60 * 60 * 2 *3) #sleep 2 hours
 
-nets_list = [
-            # TestNet,
-            # IncepResV2,
-            # FBResnet152,
-            # DenseNet,
-            DPN92,
-            # Resnext101,
-            # VGG19bn,
-            # resnet18, 
-            # resnet34, 
-            # resnet50,
-            # VGG19bn_aux
-            # SqueezeNet,
-            # DenseNet_121,
-            # DRN107,
-            # TestNet_one_d
-]
+torch.multiprocessing.set_sharing_strategy('file_system')
+
+
+MODES = ["train", "predict", "pipe",
+        "debug_dataset",
+        "stack", "debug_stack"]
+
 
 class Main(object):
-    def __init__(self, net_tuple, RS, folder_for_model_weights = None, predict_custom_flag = False):
-        """
-        folder_for_model_weights - folder where the weight for model are stored
-        """
-        self.RS = RS
-        print('Random seed = %d'%RS)
+    def __init__(self):
+        self.debugger = Debugger()
+        self.get_args()
+        self.generate_config()
+        self.prepare_infrastructure()
+        self.set_logger()
 
-        #random seed
-         #--------------------------
-        np.random.seed(RS)
-        random.seed(RS)
+    def get_args(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--config", help="Path to config file", default="configs/base.json")
+        parser.add_argument("--mode", help="Mode: train or predict or pipe.", default="pipe")
+        parser.add_argument("--target", help="Target: if None -> all, else only one for binary.", default=None)
 
-        torch.cuda.manual_seed_all(RS)
-        torch.manual_seed(RS)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(RS)
-            torch.cuda.manual_seed(RS)
-        #--------------------------
+        args = parser.parse_args()
+        self.config = json.load(open(os.path.join(os.getcwd(), args.config), "r"))
+        self.config['mode'] = args.mode
+        self.config['config_name'] = args.config
+        self.config['mode_target'] = args.target
 
-        self.net_name = net_tuple[0]
-        self.train_flag = True
-        self.folder_for_model_weights = folder_for_model_weights
-        if self.folder_for_model_weights is not None:
-            self.train_flag = False
+    def is_debug(self):
+        if "debug" in self.config['mode']:
+            return True
+        if "base" in self.config['config_name']:
+            return True
+        return False
 
-        self.num_folds = 5
-        self.best_weights = []
-        self.training_logs = []
-        self.pseudo_file = pseudo_file
-        self.augs_func_list = [None, aug.random_speed, aug.random_noise, aug.random_shift] 
-        self.mode = mode
-        self.predict_custom_flag = predict_custom_flag
+    def get_folder_type(self):
+        if self.config['mode'] in ['train', 'predict', 'pipe']:
+            res = "nn"
+        elif self.is_debug():
+            res = "_debug"
+        elif "stack" in self.config['mode']:
+            res = "stack"
+        if self.config['mode_target'] is not None:
+            res = os.path.join(res, f"target_{self.config['mode_target']}")
+        return res
 
-        if self.folder_for_model_weights:
-            self.train_flag = False
-            print('No train.')
-            self.get_weights_name()
+    def generate_config(self):
+        env_file = json.load(open(os.path.join(str(Path.home()), ".kaggle/path.json"), "r"))
+        competition_file = json.load(open(os.path.join(os.getcwd(), "competition.json"), "r"))
+        aug_json = json.load(open(os.path.join(os.getcwd(), "configs/service/aug.json"), "r"))
+        self.config.update(competition_file)
+        self.config['augs'] = aug_json
+        self.config['dataset'].update(competition_file['dataset_split'])
+        self.config['siamese'] = self.config.get("siamese", False)
 
-        self.epochs = epochs
+        if self.config['siamese'] & self.config['dataset']['resize'][0] >= 512:
+            self.config["competition_data_folder"] = "protein"
+            self.config["competition_img"]["type"] = {"test": "tif", "train": "tif"}
+        elif self.config['competition_data_folder'] == "protein/protein_1024":
+            self.config["competition_img"]["type"] = {"test": "jpg", "train": "jpg"}
+        elif self.config['competition_data_folder'] == "protein/protein_512":
+            self.config["competition_img"]["type"] = {"test": "png", "train": "png"}
+        else:
+            raise NotImplementedError("No such data folder")
 
-        
-        if self.mode == '31class':
-            name = 'nn/'
-            self.silence_binary_flag = False
-            if self.pseudo_file:
-                name = 'pseudo_n_n/'
-            elif (self.folder_for_model_weights is not None) & (self.predict_custom_flag):
-                name = 'custom_predictions/'
-                self.custom_dataset = CustomPredictionDataset('silence')
-        if "one_d" in self.net_name:
-            name = 'one_d/'
+        self.config['n_threds'] = cpu_count()
+        self.config['device'] = "cuda" if torch.cuda.is_available() else "cpu"
+        self.config["net_name"] = self.config['net_class'].split(".")[-1]
+        self.config['out_path'] = os.path.join(env_file['output_path'],
+                                                 self.config['competition_name'])
+        self.config['out_folder'] = os.path.join(self.config['out_path'],
+                                                 self.get_folder_type())
+        self.config['out_folder'], counter = utils.create_path(self.config['out_folder'])
+        self.config['visdom_env_name'] = self.config['net_name'] + f"_{counter}"
+        self.config['data_folder'] = os.path.join(env_file['data_path'],
+                                                  self.config['competition_data_folder'])
+        self.config['predictions_folder'] = os.path.join(self.config['out_folder'],
+                                                        "predicitons")
+        self.config['weights_folder'] =os.path.join(self.config['out_folder'],
+                                                    "weights")
+        self.config['splits_path'] = os.path.join(str(Path.home()),
+                                                  ".kaggle_splits",
+                                                  self.config['competition_name'],
+                                                  "debug" if self.is_debug() else "",)
+        if self.config['pretrained_weights'] is not None:
+            self.config['pretrained_weights'] = os.path.join(os.path.split(self.config['out_folder'])[0],
+                                                             self.config['pretrained_weights'])
+        if self.config['use_folds'] == "all":
+            self.config['use_folds'] = list(range(self.config['dataset']['n_folds']))
+        self.config['debug'] = False
+        if self.is_debug():
+            self.config['n_epochs'] = 2
+            self.config['mode_train']['unfreeze'] = 1
+            self.config['debug'] = True
+            # self.config['mode_stack']['early_stopping_rounds'] = 5
+            # self.config['mode_stack']["num_rounds"] = 10
 
+        assert len(self.config['mode_train']['loss']) <= 1, "Cannot be more than 1 loss type"
+        assert self.config['competition_type'] in ['binary', 'multilabel', 'multiclass', 'segmentation']
 
-        elif self.mode == 'binary':
-            self.silence_binary_flag = True
-            name = 'binary/'
+    def prepare_infrastructure(self):
+        os.makedirs(self.config['out_folder'], exist_ok=True)
+        os.makedirs(self.config['splits_path'], exist_ok=True)
+        os.makedirs(self.config['predictions_folder'], exist_ok=True)
+        os.makedirs(self.config['weights_folder'], exist_ok=True)
+        utils.save_src_to_zip(save_path=self.config['out_folder'])
 
-        if self.net_name  == 'TestNet':
-            self.epochs = 1
-            name = '_nn_test_script/%s/'%name      
+        with open(os.path.join(self.config['out_folder'], "settings.json"), "w") as f:
+            json.dump(self.config, f, indent=2, sort_keys=True)
 
-        #folders
-        self.folder_name = config.OUTPUT_FOLDER + name
-        self.folder_name = utils.path_that_not_exist(self.folder_name, create = True)
-        utils.save_src_to_zip(self.folder_name, ['data'])
-        
-        if (self.folder_for_model_weights is not None) & (self.predict_custom_flag):
-            shutil.copy(config.OUTPUT_FOLDER + self.folder_for_model_weights + '/label_encoder.dump',self.folder_name )
-
-
-        self.splits_folder = self.folder_name + 'splits/'
-        if not os.path.exists(self.splits_folder):
-            os.makedirs(self.splits_folder)
-
-        self.sub_name = self.folder_name  + self.net_name + '_' + str(uuid.uuid4()) + '.csv'
-
-        self.test_prediction = None
-        self.train_prediction = None
-        print('Using %s net'%net_tuple[0])
-        print('Saving to %s'%self.folder_name)
-
-       # dump settings
-        settings_dict = {}
-        settings_dict['RS'] = self.RS
-        settings_dict['arch'] = self.net_name
-        settings_dict['test_augs_list'] = [x.__name__ if x is not None else x for x in self.augs_func_list ]
-        with open(self.folder_name + 'settings.json', 'w') as f:
-            json.dump(settings_dict, f)
+    def set_logger(self):
+        self.log = utils.set_logger(out_folder=self.config['out_folder'], name="log")
+        self.log.info(f"{self.config}")
 
     def __call__(self):
-        self.ds = Dataset(RS = self.RS, proj_folder = self.folder_name, 
-                            pseudo_file = self.pseudo_file,
-                            silence_binary = self.silence_binary_flag,
-                            include_double_words = include_double_words
-                            )
+        if self.config['mode'] not in MODES:
+            raise NotImplementedError("No such mode!")
+        else:
+            if self.config['mode'] == "debug_dataset":
+                self.debugger.dataset(config=self.config)
+            elif "stack" in self.config['mode']:
+                Stacker(config=self.config)()
+            elif self.config['mode'] in ["train", "predict", "pipe"]:
+                Pipe(config=self.config)()
 
-        test_dataset = self.ds.test       
-        if self.predict_custom_flag:
-            test_dataset = self.custom_dataset.test 
-        test_loader_list = self.generate_tta_loader_list(test_dataset)
+        self.log.info(f"Saved to {self.config['out_folder']}")
 
-        for fold_num in [4,3,2,1,0]:#np.arange(self.num_folds):
-            #train
-            train_ids = self.ds.train_ids_list[fold_num]
-            outfile = open(self.splits_folder + 'train_%d.txt'%fold_num, 'w')
-            for item in train_ids:  outfile.write("%s\n" % str(item))
-
-            valid_ids = self.ds.val_ids_list[fold_num]
-            outfile = open(self.splits_folder + 'val_%d.txt'%fold_num, 'w')
-            for item in valid_ids:  outfile.write("%s\n" % str(item))
-
-            print('Train index', train_ids[:15])
-            if mode == '31class':
-                if not include_double_words:
-                    train_ds = ImageDataset(self.ds.train[self.ds.train[config.id_col].isin(train_ids)],
-                                        include_target = True,
-                                        X_transform = aug.data_transformer)
-                    val_ds = ImageDataset(self.ds.train[self.ds.train[config.id_col].isin(valid_ids)], 
-                                        include_target = True,
-                                        X_transform = None)
-
-                    train_loader = DataLoader(train_ds, batch_size,
-                                        sampler = RandomSampler(train_ds),
-                                        num_workers = config.THREADS,
-                                        pin_memory= config.USE_CUDA )
-                    valid_loader = DataLoader(val_ds, batch_size,
-                                        num_workers = config.THREADS,
-                                        pin_memory = config.USE_CUDA )
-                else:
-                    train_ds = ImageDataset(self.ds.train,
-                                    include_target = True,
-                                    X_transform = aug.data_transformer)
-                    val_ds = ImageDataset(self.ds.train, 
-                                        include_target = True,
-                                        X_transform = None)
-                    train_loader = DataLoader(train_ds, batch_size,
-                                        sampler = UnknownsRandomSampler(self.ds.train[self.ds.train[config.id_col].isin(train_ids)]),
-                                        num_workers = config.THREADS,
-                                        pin_memory = config.USE_CUDA )              
-                    valid_loader = DataLoader(val_ds, batch_size,
-                                        sampler = UnknownsRandomSampler(self.ds.train[self.ds.train[config.id_col].isin(valid_ids)]),
-                                        num_workers = config.THREADS,
-                                        pin_memory = config.USE_CUDA )                     
-
-            elif mode == 'binary':
-                train_ds = ImageDataset(self.ds.train,
-                                    include_target = True,
-                                    X_transform = aug.data_transformer)
-                val_ds = ImageDataset(self.ds.train, 
-                                    include_target = True,
-                                    X_transform = None)
-
-
-                train_loader = DataLoader(train_ds, batch_size,
-                                    sampler = SilenceBinaryRandomSampler(self.ds.train[self.ds.train[config.id_col].isin(train_ids)]),
-                                    num_workers = config.THREADS,
-                                    pin_memory = config.USE_CUDA )              
-                valid_loader = DataLoader(val_ds, batch_size,
-                                    sampler = SilenceBinaryRandomSampler(self.ds.train[self.ds.train[config.id_col].isin(valid_ids)]),
-                                    num_workers = config.THREADS,
-                                    pin_memory = config.USE_CUDA )
-            valid_loader_oof_list = self.generate_tta_loader_list(self.ds.train[self.ds.train[config.id_col].isin(valid_ids)])
-
-            #train
-            if self.train_flag :
-                classifier = nn.classifier.Classifier(net_tuple = net_tuple, train_loader = train_loader, 
-                                                    valid_loader_oof_list = valid_loader_oof_list,
-                                                    valid_loader = valid_loader, test_loader_list = test_loader_list, 
-                                                    output_folder = self.folder_name, fold_num = fold_num,
-                                                    load_model_from_file = None, mode = self.mode)
-                classifier.train(self.epochs)
-            else: #load model and predict 
-                classifier = nn.classifier.Classifier(net_tuple = net_tuple, train_loader = train_loader, 
-                                                    valid_loader_oof_list = valid_loader_oof_list,
-                                                    valid_loader = valid_loader, test_loader_list = test_loader_list, 
-                                                    output_folder = self.folder_name, fold_num = fold_num,
-                                                    load_model_from_file = self.model_weights_dict[fold_num],
-                                                    mode = self.mode)
-            
-            #predict
-            oof_train, test_pred_sub, self.aug_col_list = classifier.predict()
-
-            if self.train_flag :
-                training_log_info = classifier.training_log_info
-                self.best_weights.append(training_log_info.head(1)['weight'].item())
-                self.training_logs.append(training_log_info)
-
-            del classifier; gc.collect
-
-            #concat oof for train
-            if isinstance(self.train_prediction, pd.DataFrame):
-                self.train_prediction = pd.concat([self.train_prediction , oof_train])
-            else:
-                self.train_prediction = oof_train
-
-            #merge test predictions
-            if isinstance(self.test_prediction, pd.DataFrame):
-                self.test_prediction = self.test_prediction.merge(test_pred_sub, on = 'id')
-            else:
-                self.test_prediction = test_pred_sub
-
-
-        #calculate score across folds
-        self.errors_dict = {}
-        loss_list = np.array([x.head(1)['valid_loss'].item() for x in self.training_logs])
-
-        self.errors_dict['val_std'] = np.std(loss_list)
-        self.errors_dict['val_mean'] = np.mean(loss_list)
-        self.errors_dict['best_dict'] = self.best_weights
-                
-        with open(self.folder_name + 'results.json', 'w') as fp:
-            json.dump(self.errors_dict, fp)
-
-        #calculating mean score on train
-        # train_prediction_for_error = self.train_prediction.copy()
-        # train_prediction_for_error.rename(columns = {config.target_col : config.target_col + '_pr'}, inplace = True)
-        # self.ds.train.rename(columns = {config.target_col : config.target_col + '_gt'}, inplace = True)
-        # df = self.ds.train.merge(train_prediction_for_error, on = 'id')
-        # df['error'] = np.abs(df[config.target_col + '_gt'] - df[config.target_col + '_pr'])
-        # self.errors = df['error'].values
-
-
-    def plot(self):
-        #fold performance
-        f, ax = plt.subplots(1, self.num_folds, figsize = (20, 6))
-        for i in np.arange(self.num_folds):
-            self.training_logs[i].sort_values('weight', inplace = True)
-            ax[i].plot(self.training_logs[i]['weight'].tolist(), self.training_logs[i]['train_loss'].tolist(), color = 'blue', label = 'train')
-            ax[i].plot(self.training_logs[i]['weight'].tolist(), self.training_logs[i]['valid_loss'].tolist(), color = 'red', label = 'val')
-            ax[i].set_title('Fold %d'%i)
-            ax[i].legend(loc = 'upper right', shadow = True)
-            ax[i].grid()
-            ax[i].set_ylim([0, 0.5])
-        
-        plt.savefig(self.folder_name + 'img_loss.png', dpi = 100)
-
-        #train test prediction distribution and train error
-        # f, ax = plt.subplots(2, 1, figsize = (20, 15))
-        # ax[0].hist(self.errors, normed = True,  bins = 200)
-        # ax[0].set_title('train error')
-        # ax[0].grid()
-
-        # ax[1].hist(self.test_prediction[config.target_col].tolist(), normed = True, label = 'test', bins = 100)
-        # ax[1].hist(self.train_prediction[config.target_col].tolist(), normed = True, label = 'train', bins = 100)
-        # ax[1].legend(loc = 'upper right')
-        # ax[1].set_title('Train / test prediction distibution')
-        # ax[1].grid()
-
-        # plt.savefig(self.folder_name + 'img_distibutions.png', dpi = 100)
-
-    def get_weights_name(self):
-        self.model_weights_dict = {}
-        self.parse_folds(config.OUTPUT_FOLDER + '/' + self.folder_for_model_weights + '/')
-
-    def parse_folds(self, folder):
-        csv_files = glob.glob(folder +  '*.csv')
-        training_log_file_names = [x for x in csv_files if 'trainig_log' in x]
-        print(training_log_file_names)
-        print('Found %d folds'%self.num_folds)
-        for i in np.arange(self.num_folds):
-            training_info = pd.read_csv(training_log_file_names[i])
-            training_info.sort_values('valid_loss', inplace = True)
-            best_weight_name = 'w_' + str(training_info.head(1)['weight'].item()) + '.dat'
-            self.model_weights_dict[i] = folder + '/fold_w_%d/'%i + best_weight_name
-
-            self.training_logs.append(training_info)
-            self.best_weights.append(training_info.head(1)['weight'].item())
-
-    def remove_unnecessary_weights(self): 
-        print('Removing unnecessary weights.')
-        folder = self.folder_name
-        csv_files = glob.glob(folder +  '*.csv')
-        training_log_file_names = [x for x in csv_files if 'trainig_log' in x]
-        print('Found %d folds'%self.num_folds)
-        for i in np.arange(self.num_folds):
-            training_info = pd.read_csv(training_log_file_names[i])
-            training_info.sort_values('valid_loss', inplace = True)
-            #remove_unnecessary_weights(self):
-            top_3_weights = training_info.head(2)['weight'].tolist()
-            unnecessary_weigths =  training_info[~training_info['weight'].isin(top_3_weights)]['weight'].tolist()
-            for bad_weight in unnecessary_weigths:
-                os.remove(folder + '/fold_w_%d/'%i + 'w_' + str(bad_weight) + '.dat')
-
-    def generate_tta_loader_list(self, df):
-        res_list = []
-
-        print('predicting on %d augmentations'%len(self.augs_func_list))
-
-        for augs_func in self.augs_func_list:
-            ds = ImageDataset(df,  include_target = False,  X_transform =  augs_func, u = 666)
-
-            tl = DataLoader(ds, batch_size,
-                    num_workers = config.THREADS,
-                    pin_memory= config.USE_CUDA,
-                    )
-
-            res_list.append(tl) 
-
-        return res_list
 
 if __name__ == "__main__":
-    for i in enumerate(np.arange(len(nets_list))):
-        i = i[0]
-        nets_list[i] = [nets_list[i].__name__, nets_list[i]]
-        print(nets_list[0][0])
-        for RS in RS_list:
-            for net_tuple in nets_list:
-                m = Main(net_tuple, RS, folder_for_model_weights = None)
-                m()
-                m.plot()
-
-                del m; gc.collect()
-                
-                print('Waiting delay')
-                time.sleep(60) 
-
-
-
-# if __name__ == "__main__":
-#     folders_list = ["nn_11"]
-#     for folder in folders_list:
-#         print("predicting %s"%folder)
-#         data_folder = config.OUTPUT_FOLDER + folder +'/'
-#         arch_name = json.load(open( data_folder + 'settings.json', 'r'))['arch']
-#         arch = eval(arch_name)
-#         # loading net name
-
-#         net_tuple = (arch_name, arch)
-#         m = Main(net_tuple, RS = RS_list[0], folder_for_model_weights = folder, predict_custom_flag = True)
-#         m()
+    Main()()

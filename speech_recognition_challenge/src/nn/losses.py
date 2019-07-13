@@ -4,7 +4,6 @@ from torch.autograd import Variable
 import torch
 import numpy as np
 
-
 class CrossEntropyLoss2d(nn.Module):
     def __init__(self, weight=None, size_average=True):
         super(CrossEntropyLoss2d, self).__init__()
@@ -52,7 +51,6 @@ class SoftDiceLoss(nn.Module):
         score = 1 - score.sum() / num
         return score
 
-
 class EuclidianDistance(nn.Module):
     def __init__(self, p = 2, eps = 1e-16):
         super(EuclidianDistance, self).__init__()
@@ -65,9 +63,9 @@ class EuclidianDistance(nn.Module):
         x2 = x2.view(num, -1)
         res =  F.pairwise_distance(x1, x2, self.norm, self.eps)
         res = res / (75 * 75 * num)
+
         res = torch.mean(res)
         return res
-
 
 #https://github.com/jxgu1016/Total_Variation_Loss.pytorch/blob/master/TVLoss.py
 class TVLoss(nn.Module):

@@ -1,0 +1,12 @@
+pandas
+numpy
+tqdm
+lightgbm
+opencv-python
+scikit-learn
+xgboost
+catboost
+xgbfir
+scikit-image
+albumentations
+pretrainedmodels

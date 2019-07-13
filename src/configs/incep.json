@@ -1,0 +1,25 @@
+{
+  "batch_size": 60,
+  "dataset": {
+    "resize": [
+      299,
+      299
+    ],
+    "sampler": "sampler.ClassVsOthersSampler"
+  },
+  "mode_train": {
+    "loss": {"weighted_loss": true},
+    "lowest_lr": 1e-8,
+    "lr_scheduler": "plateau",
+    "optim": "adam",
+    "start_lr": 0.001,
+    "unfreeze": 0
+  },
+  "n_epochs": 100,
+  "net_class": "incep_res_v2.IncepResV2",
+  "pretrained_weights": null,
+  "pseudo_file": null,
+  "use_folds": [
+    0
+  ]
+}

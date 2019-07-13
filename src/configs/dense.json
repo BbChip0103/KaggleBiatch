@@ -1,0 +1,25 @@
+{
+  "batch_size": 10,
+  "dataset": {
+    "resize": [
+      512,
+      512
+    ],
+    "sampler": null
+  },
+  "mode_train": {
+    "loss": {"ohnm":  {"ratio": 0.33}},
+    "lowest_lr": 1e-8,
+    "lr_scheduler": "plateau",
+    "optim": "adam",
+    "start_lr": 0.001,
+    "unfreeze": 2
+  },
+  "n_epochs": 100,
+  "net_class": "dense.DenseNet",
+  "pretrained_weights": null,
+  "pseudo_file": null,
+  "use_folds": [
+    0
+  ]
+}

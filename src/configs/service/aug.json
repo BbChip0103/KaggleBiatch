@@ -1,0 +1,26 @@
+{
+  "train": {
+    "aug_p": 0.5,
+    "augs": [
+      "Flip",
+      "RandomRotate90",
+      "ShiftScaleRotate",
+      "Color_of"
+    ]
+  },
+  "tta": {
+    "augs": [
+      null,
+      "HorizontalFlip",
+      "VerticalFlip",
+      "IAASharpen",
+      "IAAEmboss",
+      "RandomContrast",
+      "RandomBrightness",
+      "RotateClock90",
+      "RotateCounterClock90",
+      "RotateCounterClock180",
+      "ShiftScaleRotate"
+    ]
+  }
+}

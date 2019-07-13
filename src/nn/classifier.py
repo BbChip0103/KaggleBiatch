@@ -1,348 +1,188 @@
-import csv
-import gzip
-import json
-import pickle
-import sys
-from collections import OrderedDict
-import uuid
 import os
+from collections import OrderedDict
+import logging
 
-import cv2
+from scipy.stats.mstats import gmean
 import pandas as pd
 import torch
-import torch.nn.functional as F
-import torch.optim as optim
-from torch.autograd import Variable
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader
 import torch.nn as nn
 from tqdm import tqdm
 import numpy as np
 
-import config
-import nn.losses as losses_utils
-import nn.tools as tools
-from skimage.io import imsave
-import warnings
-import zipfile
-from sklearn.metrics import roc_auc_score, accuracy_score
+import nets
+from . import losses as losses_utils
+from utils import utils
+from . import tools
+from .initer import Initer
+log = logging.getLogger(__name__)
 
-sys.path.insert(0,'..')
-warnings.filterwarnings("ignore")
 
-class Classifier:
-    def __init__(self, net_tuple, train_loader, valid_loader, valid_loader_oof_list,
-                 test_loader_list, output_folder, fold_num, load_model_from_file = None,
-                 mode = '31class'):
-        """
-        """
-        self.nn_name = net_tuple[0]
-        self.net = net_tuple[1]()
-        self.valid_loader = valid_loader
-        self.train_loader = train_loader
-        self.valid_loader_oof_list = valid_loader_oof_list
-        self.test_loader_list = test_loader_list
-        self.use_cuda = config.USE_CUDA
-        self.threshold = 0.5
-        self.load_model_from_file = load_model_from_file
-        self.fold_num = fold_num
-        self.output_folder = output_folder
-        self.output_folder_predictions = self.output_folder + 'predictions/'
-        self.mode = mode
-
-        if self.mode == 'binary':
-            self.tensor_type = torch.FloatTensor
-        else:
-            self.tensor_type = torch.LongTensor
-
-        self.lr_continue = 1e-3
-        self.lr_min = 1e-8 #so if lr == lr_min - than early stop
-        self.optimizer =  optim.SGD(self.net.parameters(), lr = self.lr_continue, momentum = 0.9, weight_decay = 0.0001)
-        # self.optimizer =  optim.RMSprop(self.net.parameters(), lr = self.lr_continue, momentum = 0.9, weight_decay = 0.0001)
-        # self.optimizer =  optim.Adam(self.net.parameters(), lr = self.lr_continue)
-
-        if not os.path.exists(self.output_folder_predictions):
-            os.makedirs(self.output_folder_predictions)
-            
-        self.sub_name = self.output_folder + self.nn_name + '_' + str(uuid.uuid4())
-
-        if self.load_model_from_file:
-            self.net.load_state_dict(torch.load(self.load_model_from_file))
-
-    def _criterion(self, probs, labels):
-        if self.mode == 'binary':
-            res = torch.nn.BCELoss().forward(probs, labels)
-        else:
-            res = torch.nn.CrossEntropyLoss().forward(probs, labels)
-        # res = losses_utils.StableBCELoss().forward(probs, labels)
-        
-        return res
+class Clf(Initer):
+    def __init__(self, config, payload):
+        super().__init__(config, payload)
 
     def _validate_epoch(self):
-        losses = tools.AverageMeter()
+        self.net.eval()
+        losses = {"loss": tools.AverageMeter(), "additional": tools.AverageMeter()}
         accuracies = tools.AverageMeter()
-
-        it_count = len(self.valid_loader)
-        batch_size = self.train_loader.batch_size
-        with tqdm(total = it_count, desc = "Validating", leave = False) as pbar:
-            for ind, loader_dict in enumerate(self.valid_loader):
-                #train
-                loss, acc = self._batch_train_validation(loader_dict, volatile = True)
-                
-                losses.update(loss.data[0], batch_size)
+        batch_size = self.payload['train_loader'].batch_size
+        with tqdm(total=len(self.payload['valid_loader']), desc="Validating", leave=False) as pbar:
+            for ind, loader_dict in enumerate(self.payload['valid_loader']):
+                with torch.no_grad():
+                    loss, acc = self._batch_train_validation(loader_dict)
+                for k in losses.keys():
+                    losses[k].update(loss[k].item(), batch_size)
                 accuracies.update(acc, batch_size)
                 pbar.update(1)
+        return {k: l.avg for k, l in losses.items()}, accuracies.avg
 
-        return losses.avg, accuracies.avg
-
-    def _train_epoch(self, epoch_id, epochs):
-        losses = tools.AverageMeter()
+    def _train_epoch(self, epoch_id):
+        self.net.train()
+        losses = {"loss": tools.AverageMeter(), "additional": tools.AverageMeter()}
         accuracies = tools.AverageMeter()
-
-        # Total training files count / batch_size
-        batch_size = self.train_loader.batch_size
-        it_count = len(self.train_loader)
-
-        with tqdm(total = it_count,
-                  desc = "Epochs {}/{}".format(epoch_id + 1, epochs),
-                  bar_format = '{l_bar}{bar}| {n_fmt}/{total_fmt} [{remaining}{postfix}]'
+        batch_size = self.payload['train_loader'].batch_size
+        with tqdm(total=len(self.payload['train_loader']),
+                  desc="Epochs {}/{}".format(epoch_id + 1, self.config['n_epochs']),
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{remaining}{postfix}]'
                   ) as pbar:
 
-            for ind, loader_dict in enumerate(self.train_loader):
-                
-                #train
-                loss, acc = self._batch_train_validation(loader_dict, volatile = False)
+            for ind, loader_dict in enumerate(self.payload['train_loader']):
+                loss, acc = self._batch_train_validation(loader_dict)
 
-                # backward + optimize
                 self.optimizer.zero_grad()
-                loss.backward()
+                loss['loss'].backward()
                 self.optimizer.step()
 
-                losses.update(loss.data[0], batch_size)
+                for k in losses.keys():
+                    losses[k].update(loss[k].item(), batch_size)
                 accuracies.update(acc, batch_size)
-
-                # Update pbar
-                pbar.set_postfix(OrderedDict(loss='{0:1.5f}'.format(loss.data[0]), acc='{0:1.5f}'.format(acc)))
+                loss_str = f"{loss['loss'].item():.5f} | {loss['additional'].item():.5f}"
+                pbar.set_postfix(OrderedDict(loss=loss_str,
+                                             acc='{0:1.5f}'.format(acc)))
                 pbar.update(1)
-        return losses.avg, accuracies.avg
+        return {k: l.avg for k, l in losses.items()}, accuracies.avg
 
-    def _batch_train_validation(self, loader_dict, volatile):
-        #volatile = False for train
-        target = loader_dict['target'].type(self.tensor_type)
+    def _batch_train_validation(self, loader_dict):
+        images = loader_dict['img'].type(torch.FloatTensor).to(self.config['device'])
+        target = loader_dict['target'].type(torch.FloatTensor).to(self.config['device'])
 
-        # target
-        if self.use_cuda:target = target.cuda()
-        target = Variable(target, volatile = volatile)
-
-        if 'one_d' not in self.nn_name:
-            images = loader_dict['img']
-            if self.use_cuda: images = images.cuda()
-            images = Variable(images, volatile = volatile)
-
-        if ('aux' in self.nn_name) or ('one_d' in self.nn_name):
-            aux = loader_dict['aux']
-            if self.use_cuda: aux = aux.cuda()
-            aux = Variable(aux, volatile = volatile)
-
-        # create input list
-        if 'aux' in self.nn_name:
-            input_list = [images, aux]
-        elif 'one_d' in self.nn_name:
-            input_list = [aux]
-        else:
-            input_list = [images]
-
-        # forward
-        probs = self.net.forward(*input_list)
-
+        probs = self.net.forward(images)
         loss = self._criterion(probs, target)
-
-        if self.mode == 'binary':
-            acc = accuracy_score(target.data.cpu().numpy() , probs.data.cpu().numpy().round())
-        else:
-            acc = accuracy_score(target.data.cpu().numpy(), nn.Softmax()(probs).data.cpu().numpy().round().argmax(axis=1))
+        acc = self._calculate_acc(target, probs)
         return loss, acc
-    
-    def train(self, epochs, threshold = 0.5):
-        """
-        """
-        self.weights_folder = self.output_folder + 'fold_w_%d/'%self.fold_num
-        self.weights_folder = utils.path_that_not_exist(self.weights_folder, create = True)
 
-        if self.use_cuda:
-            self.net.cuda()
+    def train(self):
+        self.net.train()
+        log.info(f"Training on {len(self.payload['train_loader'].dataset)} samples.")
+        log.info(f"Validating on {len(self.payload['valid_loader'].dataset)} samples.")
 
-        print("Training on {} samples and validating on {} samples "
-              .format(len(self.train_loader.dataset), len(self.valid_loader.dataset)))
+        log_df_dict = {"weight": [],
+                       "train_loss": [],
+                       "train_loss_additional": [],
+                       "valid_loss": [],
+                       "valid_loss_additional": [],
+                       "train_acc": [],
+                       "valid_acc": [],
+                       "lr": []}
 
-         #continue train and write weights to existing folder
-        training_info_from_file_flag = False
-        
-        start_epoch_continue = 0
-        print('Training from scratch')
-
-        if not training_info_from_file_flag:
-            train_loss_list = []
-            valid_loss_list = []
-            train_acc_list =[]
-            valid_acc_list =[]
-            lr_list = []
-            weights_list =[]
-
-        lr_scheduler = ReduceLROnPlateau(self.optimizer, 'min', 
-                                    patience = 4,  verbose = True, 
-                                    min_lr = self.lr_min
-                                    )
-
-        for epoch_id in range(start_epoch_continue, epochs):
-            #early stopping
-            if (epoch_id > 0): 
-                if (current_lr <= 2 * self.lr_min) :
-                    print('Early stopping')
-                    break
-
-            self.net.train()
-            # Run a train pass on the current epoch
-            train_loss, train_acc = self._train_epoch(epoch_id, epochs)
-
-            # switch to evaluate mode
-            self.net.eval()
-            valid_loss, valid_acc = self._validate_epoch()
-            print("train_loss = {:03f}, val_loss = {:03f}, train_acc = {:03f}, val_acc = {:03f} -- {} {}" \
-                                .format(train_loss,valid_loss, train_acc, valid_acc, self.nn_name, self.fold_num))
-            print("")
-
-            #get current lr
+        for epoch_id in range(self.start_epoch, self.config['n_epochs']):
             current_lr = self.optimizer.param_groups[0]['lr']
-            
-            #save weights on each epoch    
-            weights_final_name = self.weights_folder + 'w_' + str(epoch_id) + '.dat'
-            weights_final_name = utils.path_that_not_exist(weights_final_name)
-            torch.save(self.net.state_dict(), weights_final_name)
+            log.info(f"Epoch {epoch_id} / {self.config['n_epochs']}, LR = {current_lr}")
+            if (epoch_id > 0):
+                if self.config['mode_train']['lr_scheduler'] == "plateau":
+                    if (current_lr <= 2 * self.config['mode_train']['lowest_lr']):
+                        log.info(f'Early stopping with lr = {current_lr}')
+                        break
 
-            #saving to pandas df
-            train_loss_list.append(train_loss)
-            valid_loss_list.append(valid_loss)
-            train_acc_list.append(train_acc)
-            valid_acc_list.append(valid_acc)
-            lr_list.append(current_lr)
-            weights_list.append(str(epoch_id))
+            if epoch_id == self.config['mode_train']['unfreeze']:
+                log.info(f"Unfreezing net on {epoch_id} epoch.")
+                self.net.module.unfreeze()
 
-            #update loss info on every step
-            self.training_log_info = pd.DataFrame({'weight' : weights_list, 'train_loss' : train_loss_list, 'valid_loss' : valid_loss_list,
-                                                'train_acc' : train_acc_list, 'valid_acc' : valid_acc_list, 'lr' : lr_list })
-            self.training_log_info.sort_values('valid_loss', inplace = True)
-            self.training_log_info.to_csv(self.output_folder + "trainig_log%d.csv"%self.fold_num, index = False)
+            if epoch_id >= 3:
+                self.net.module.reset()
 
-            #lr step
-            lr_scheduler.step(valid_loss, epoch_id)
-    
-            #if we have decreased lr - load training from the best previous weight for this lr
-            if  self.optimizer.param_groups[0]['lr']  < current_lr:
-                best_weight_name = self.training_log_info[self.training_log_info['lr'] == current_lr].sort_values('valid_loss').head(1)['weight'].item()
-                print('Decrease lr - loading best weight %s for lr %f'%(str(best_weight_name), current_lr))
-                self.net.load_state_dict(torch.load( self.weights_folder + 'w_' + str(best_weight_name) + '.dat' ))
-        #remove weights
-        self.remove_unnecessary_weights()
-        
+            train_loss, train_acc = self._train_epoch(epoch_id)
+            valid_loss, valid_acc = self._validate_epoch()
+            strs = [f"tl={train_loss['loss']:.5f}",
+                    f"tl_a={train_loss['additional']:.5f}",
+                    f"vl={valid_loss['loss']:.5f}",
+                    f"vl_a={valid_loss['additional']:.5f}",
+                    f"ta={train_acc:.3f}",
+                    f"va={valid_acc:.3f}"]
+            log.info("; ".join(strs) + f"; {self.config['net_name']} {self.payload['fold_num']}\n")
+
+            self.save_state(epoch=epoch_id)
+
+            log_df_dict['train_loss'].append(train_loss['loss'])
+            log_df_dict['train_loss_additional'].append(train_loss['additional'])
+            log_df_dict['valid_loss'].append(valid_loss['loss'])
+            log_df_dict['valid_loss_additional'].append(valid_loss['additional'])
+            log_df_dict['train_acc'].append(train_acc)
+            log_df_dict['valid_acc'].append(valid_acc)
+            log_df_dict['lr'].append(current_lr)
+            log_df_dict['weight'].append(f"{self.payload['fold_num']}_{epoch_id}.pth")
+            self.training_log_info = pd.DataFrame(log_df_dict)
+            self.training_log_info.sort_values('valid_loss', inplace=True)
+            csv_path = os.path.join(self.config['out_folder'], f"trainig_log{self.payload['fold_num']}.csv")
+            self.training_log_info.to_csv(csv_path, index=False)
+
+            self.lr_scheduler.step(valid_loss['loss'], epoch_id)
+            self._load_prev_best_weight(current_lr=current_lr)
+
     def predict(self):
-        #if training from scratch - then load best weight
-        if not self.load_model_from_file:
-            best_weight_name = self.training_log_info.sort_values('valid_loss').head(1)['weight'].item()
-            print("Loading best weight for prediction %s"%(str(best_weight_name)))
-            self.net.load_state_dict(torch.load( self.weights_folder + 'w_' + str(best_weight_name) + '.dat' ))
-            
-        # Switch to evaluation mode
-        if self.use_cuda:
-            self.net.cuda()
         self.net.eval()
+        self.predict_tta('test')
+        self.predict_tta('val')
 
-        oof_prediction, new_cols = self.predict_single_loader('val')
-        test_pred_sub, new_cols = self.predict_single_loader('test')
-        return oof_prediction,  test_pred_sub, new_cols
+    def predict_single_loader(self, mode, loader_num, loader):
+        ids = []
+        probas_batch_list = [None] * len(loader)
+        with tqdm(total=len(loader), desc="Predicting") as pbar:
+            for ind, loader_dict in enumerate(loader):
+                images = loader_dict['img'].type(torch.FloatTensor).to(self.config['device'])
+                with torch.no_grad():
+                    pred_images = self.net(images)
 
-    def predict_single_loader(self, mode):
-        """choice - val or test"""
-        if mode == 'val': 
-            loader_list = self.valid_loader_oof_list
-        elif mode == 'test':
-            loader_list = self.test_loader_list
+                probas_batch_list[ind] = self._postprocess_probs(pred_images)
+                ids = ids + loader_dict['id']
+                pbar.update(1)
+        probas = np.concatenate(probas_batch_list, axis=0)
 
-        new_cols = []
-        for loader_num, loader in enumerate(loader_list):
-            print('Predicting fold %d on loader %s : %d / %d'%(self.fold_num, mode, loader_num+1, len(loader_list)))
-            it_count = len(loader)
-            predictions = []
-            imgs_names = []
-
-            with tqdm(total = it_count, desc = "Predicting") as pbar:
-                for ind, loader_dict in enumerate(loader):
-                    
-                    images = loader_dict['img']
-                    img_id = loader_dict['id']
-                    aux = loader_dict['aux']
-
-                    if self.use_cuda:
-                        images = images.cuda()
-                        aux = aux.cuda()
-
-                    images = Variable(images, volatile = True)
-                    aux = Variable(aux, volatile = True)
-                    # forward
-
-                     # create input list
-                    if 'aux' in self.nn_name:
-                        input_list = [images, aux]
-                    elif 'one_d' in self.nn_name:
-                        input_list = [aux]
-                    else:
-                        input_list = [images]
-
-                    probs = self.net.forward(*input_list)
-
-                    if self.mode != 'binary':
-                        probs = nn.Softmax()(probs)
-
-                    # Save the predictions
-                    for (pred, name) in zip(probs, img_id):
-                        pred_arr = pred.data.cpu().numpy()
-
-                        imgs_names.append(name)
-                        predictions.append(pred_arr)
-
-                    pbar.update(1)
-
-            current_cols = []
-            for target_num in np.arange(len(predictions[0])):
-                col = config.pred_col_name_template.substitute(aug_num = loader_num, target_num = target_num)
-                current_cols.append(col)
-
-            new_cols += current_cols
-
-            s = pd.DataFrame(np.array(predictions))
-            s.columns =  current_cols  
-            s['id'] = imgs_names
-
-            if loader_num > 0:
-                sub = sub.merge(s, on = 'id') 
+        if self.config['competition_type'] in ['binary', 'multiclass', 'multilabel']:
+            if self.config['competition_type'] == 'binary':
+                predictions = np.empty([len(loader.dataset)])
             else:
-                sub = s
-        
-        if mode == 'test':
-            # assert len(sub) == config.LEN_DFS['test']
-            sub.to_csv(self.output_folder_predictions + 'test_prediction_fold_%d.csv'%(self.fold_num), index = False)
-        elif mode == 'val':
-            sub.to_csv(self.output_folder_predictions + 'oof_prediction_fold_%d.csv'%(self.fold_num), index = False)
+                predictions = np.empty([len(loader.dataset), self.config['num_classes']])
+            id_order = np.argsort(ids)
+            for i, id in enumerate(id_order):
+                if self.config['competition_type'] == 'binary':
+                    predictions[i] = probas[id]
+                else:
+                    predictions[i, :] = probas[id, :]
+            self.dump_data(ids=np.sort(ids),
+                           preds=predictions,
+                           path=os.path.join(self.config['predictions_folder'], f"{mode}_aug_{loader_num}_fold_{self.payload['fold_num']}.pth"))
+        else:
+            raise NotImplementedError
+        return ids, predictions
 
-        return sub, new_cols
-    
-    def remove_unnecessary_weights(self): 
-        print('Removing unnecessary weights.')
-        folder = self.output_folder                     
-        training_info = pd.read_csv(folder +  'trainig_log%d.csv'%self.fold_num)
-        training_info.sort_values('valid_loss', inplace = True)
-        #remove_unnecessary_weights(self):
-        top_3_weights = training_info.head(1)['weight'].tolist()
-        unnecessary_weigths =  training_info[~training_info['weight'].isin(top_3_weights)]['weight'].tolist()
-        for bad_weight in unnecessary_weigths:
-            os.remove(folder + '/fold_w_%d/'%self.fold_num + 'w_' + str(bad_weight) + '.dat')
+    def predict_tta(self, mode):
+        if mode == 'val':
+            loader_list =  self.payload['valid_loader_oof_list']
+        elif mode == 'test':
+            loader_list =  self.payload['test_loader_list']
+
+        tta_preds_list = []
+        for loader_num, loader in enumerate(loader_list):
+            log.info('TTA %s, fold %d, on: %s  (%d / %d)' % (mode,
+                                                             self.payload['fold_num'],
+                                                             str(self.payload['loader_names'][loader_num]),
+                                                             loader_num+1,
+                                                             len(loader_list)))
+            ids, predictions = self.predict_single_loader(mode=mode, loader_num=loader_num, loader=loader)
+            tta_preds_list.append(predictions)
+
+        tta_preds = self._avg_tta(tta_preds_list)
+        self.dump_data(ids=ids,
+                       preds=tta_preds,
+                       path=os.path.join(self.config['predictions_folder'], f"{mode}_prediction_fold_{self.payload['fold_num']}.pth"))

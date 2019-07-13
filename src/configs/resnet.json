@@ -1,0 +1,26 @@
+{
+  "batch_size": 72,
+  "dataset": {
+    "resize": [
+      256,
+      256
+    ],
+    "sampler": null
+  },
+  "mode_train": {
+    "loss": {},
+    "lowest_lr": 1e-8,
+    "lr_scheduler": "plateau",
+    "optim": "adam",
+    "start_lr": 0.0001,
+    "unfreeze": 0
+  },
+  "n_epochs": 100,
+  "net_class": "resnet.Resnet34",
+  "pretrained_weights": null,
+  "pseudo_file": null,
+  "siamese": true,
+  "use_folds": [
+    0
+  ]
+}
