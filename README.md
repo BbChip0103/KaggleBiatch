@@ -6,7 +6,8 @@ KaggleBiatch - The complete pipeline for Kaggle Img competitons (multiclass, mul
 * Stack them using xgboost, lightgbm and scikit-learn
 * Generate submission
 
-**It's in pre-alpha stage** bacause I abandoned Kaggle and only tried this code for Protein Competiton. There are may be a lot of bugs.
+**It's in pre-alpha stage** because I abandoned Kaggle [https://www.kaggle.com/heyt0ny](https://www.kaggle.com/heyt0ny) and only tried this code for Doodle Competiton. There are may be a lot of bugs.
+
 
 # Where is src code for Kaggle Speech Recognition Challenge?
 I refactored code from all Kaggle Competions, where I participated to make this repo. The code for Speech Recognition Challenge is in `speech_recognition_challenge` folder. It's really bad code, written on python2. So if I were you, I grabed the idea from `speech_recognition_challenge` but cloned the clean code from `src`.
